@@ -1,0 +1,162 @@
+# USB printer devices creation script for CLIP
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2009-2018 ANSSI. All Rights Reserved.
+# Copyright 2009 SGDN/DCSSI
+# Copyright 2011 SGDSN/ANSSI
+# Author: Benjamin Morin <clipos@ssi.gouv.fr>
+# Modified: Vincent Strubel <clipos@ssi.gouv.fr>
+#
+# All rights reserved
+
+USBPRINTERID="/bin/usb_printerid"
+MODELFILE="/usr/share/hpfirmwares/printermodels"
+FWPATH="/usr/share/hpfirmwares/"
+SYSPATH="/sys/class/usbmisc/"
+STATEDIR="/var/run"
+
+source "/lib/clip/import.sub"
+source "/etc/conf.d/clip"
+
+ADMIN_FILE="/etc/admin/conf.d/devices"
+JAILS_IMPORT_FILTER="${CLIP_JAILS/ /|}|prompt"
+
+###################################
+#                                 #
+#    FIRMWARE LOADING FUNCTIONS   #
+#                                 #
+###################################
+
+
+load_model()
+{
+	local printerid="${1}"
+	local printerfw="${2}"
+	local dev="${3}"
+	local printerraw="${4}"
+
+	local found=$(echo "${printerraw}" | grep -i "hp laserjet ${printerid}")
+	# Load firmware into printer and return if model identified
+	if [[ -n "${found}" ]]; then
+	   local fw="${FWPATH}/sihp${printerfw}.dl"
+	   if [[ ! -f "${fw}" ]]; then
+	      echo "Firmware ${fw} not found"
+	      return 1
+	   fi
+
+	   cat "${fw}" > "${dev}"
+
+	   return 0
+	fi
+
+	return 1
+}
+
+detect_printer() {
+	local dev="${1}"
+
+	printerraw="$(${USBPRINTERID} ${dev})"
+
+	# Did the printer return something?
+	[ -z "${printerraw}" ] && return 0
+
+	# Load a firmware only if not already loaded
+	local status=$(echo ${printerraw} | grep 'FWVER')
+	if [[ "${status}" != "" ]]; then
+	   echo "Firmware already loaded"
+	   return 0
+	fi
+
+	# Iterate over printer models to identify the right one
+	cat ${MODELFILE} | while read model; do
+	    load_model ${model} "${dev}" "${printerraw}"
+
+	    OK=$?
+	    if [[ "${OK}" -eq 0 ]]; then
+	       break
+	    fi
+	done
+	
+	if [[ "${OK}" -ne 0 ]]; then
+		echo "Unknown printer"
+	fi
+
+	return 0
+}
+
+#############################
+#                           #
+# DEVICE CREATION FUNCTIONS #
+#                           #
+#############################
+
+make_carddevs() {
+	local num="${1}"
+	local ret=0
+	local devpath= d= jail=
+
+	import_conf_noerr "${ADMIN_FILE}" "${JAILS_IMPORT_FILTER}" "PRINTER${num}_JAIL" 2>/dev/null
+	eval "jail=$(echo \${PRINTER${num}_JAIL})"
+
+	[[ -n "${jail}" ]] || return 0
+	devpath="/mounts/vsdev/${jail}/user_devs"
+
+	if [[ -e "${devpath}/usb" && ! -d "${devpath}/usb" ]]; then
+		rm -f "${devpath}/usb" && mkdir "${devpath}/usb"
+		if [[ $? -ne 0 ]]; then
+			return 1
+		fi
+	fi
+	mkdir -p "${devpath}/usb"
+
+	d="${SYSPATH}/lp${num}/"
+
+	local devicename=$(basename "${d}")
+
+	local dev="$(tr ':' ' ' < "${d}/dev")"
+	local rmdev="${devpath}/usb/${devicename}"
+
+	if [[ -e "${rmdev}" ]]; then
+		rm -f "${rmdev}" 
+	fi
+	mknod -m 0666 "${rmdev}" c ${dev} || return 1
+	echo "${jail}" > "${STATEDIR}/printer${num}.jail"
+
+	# creation du peripherique pour les acces depuis le socle (chargement de firmware)
+	local clipdev="/dev/${devicename}"
+	if [[ ! -e "${clipdev}" ]]; then
+	    mknod -m 0600 "${clipdev}" c ${dev} || return 1
+	fi
+
+	# Chargement des firmwares
+	if [[ -x "${USBPRINTERID}" ]]; then
+	    detect_printer "/dev/${devicename}"
+	fi
+
+	return 0
+}
+
+remove_carddevs() {
+	local num="${1}"
+	local ret=0
+	local devpath= 
+	local jail="$(cat "${STATEDIR}/printer${num}.jail" 2>/dev/null)"
+
+	[[ -n "${jail}" ]] || return 0
+	devpath="/mounts/vsdev/${jail}/user_devs"
+
+	local rmdev="${devpath}/usb/lp${num}"
+
+	if [[ -c "${rmdev}" ]]; then
+		rm -f "${rmdev}" || ret=1
+	fi
+
+	local clipdev="/dev/lp${num}"
+	if [[ -c "${clipdev}" ]]; then
+		rm -f "${clipdev}" || ret=1
+	fi
+
+	rm -f "${STATEDIR}/printer${num}.jail"
+	return 0
+}
+
+

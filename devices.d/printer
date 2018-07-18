@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright © 2009-2018 ANSSI. All Rights Reserved.
+# USB printer devices creation script for CLIP
+# Copyright 2009 SGDN
+# Author: Benjamin Morin <clipos@ssi.gouv.fr>
+#
+# All rights reserved
+
+source "/lib/clip/printer.sub" || exit 1
+
+# Creation des peripheriques pour les imprimantes connectees au demarrage
+make_devs() {
+	find "${SYSPATH}" -name 'lp*' -printf "%P\n" 2>/dev/null | while read c; do
+		local num="${c##lp}"
+		make_carddevs "${num}"
+	done
+}
+
+remove_devs() {
+	for j in ${CLIP_JAILS}; do
+		for f in "/mounts/vsdev/${j}/user_devs/usb/"lp*; do
+			[[ -c "${f}" ]] && rm -f "${f}"
+		done
+	done
+	for f in "/dev/"lp*; do
+		[[ -c "${f}" ]] && rm -f "${f}"
+	done
+	true
+}
+
+case "${1}" in
+	start)
+		make_devs
+		;;
+	stop)
+		remove_devs
+		;;
+	*)
+		echo "devices.d/printer: unsupported command ${1}"
+		;;
+esac
+
